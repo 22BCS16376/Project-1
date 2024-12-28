@@ -1,0 +1,144 @@
+// Import necessary modules and libraries
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const { spawn } = require('child_process'); // For ML model integration
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
+
+// MongoDB connection setup
+mongoose.connect('mongodb://localhost:27017/trafficDB', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
+const db = mongoose.connection;
+db.on('error', console.error.bind(console, 'Connection error:'));
+db.once('open', () => {
+  console.log('Connected to MongoDB');
+});
+
+// Define schemas and models
+const TrafficDataSchema = new mongoose.Schema({
+  location: String,
+  timestamp: Date,
+  vehicleCount: Number,
+  signalTiming: Number, // Optimized signal timing in seconds
+  congestionLevel: String, // Low, Medium, High
+  accidentReports: Number, // Number of accidents reported
+  safetyScore: Number, // Computed safety score
+});
+
+const TrafficData = mongoose.model('TrafficData', TrafficDataSchema);
+
+// Function to call the ML model for traffic signal optimization
+const optimizeSignalTiming = (vehicleCount) => {
+  return new Promise((resolve, reject) => {
+    const pythonProcess = spawn('python', [path.join(__dirname, 'traffic_model.py'), vehicleCount]);
+
+    pythonProcess.stdout.on('data', (data) => {
+      resolve(parseFloat(data.toString()));
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      reject(data.toString());
+    });
+  });
+};
+
+// Determine congestion level based on vehicle count
+const determineCongestionLevel = (vehicleCount) => {
+  if (vehicleCount < 20) return 'Low';
+  if (vehicleCount < 50) return 'Medium';
+  return 'High';
+};
+
+// Compute safety score based on traffic data
+const computeSafetyScore = (vehicleCount, accidentReports) => {
+  if (accidentReports === 0) return 100;
+  return Math.max(0, 100 - (vehicleCount / 10) - (accidentReports * 5));
+};
+
+// Endpoint to receive real-time traffic data and optimize signal timing
+app.post('/traffic-data', async (req, res) => {
+  try {
+    const { location, vehicleCount, accidentReports } = req.body;
+
+    // Predict optimized signal timing using ML model
+    const signalTiming = await optimizeSignalTiming(vehicleCount);
+
+    // Determine congestion level
+    const congestionLevel = determineCongestionLevel(vehicleCount);
+
+    // Compute safety score
+    const safetyScore = computeSafetyScore(vehicleCount, accidentReports);
+
+    // Save traffic data with optimized signal timing, congestion level, and safety score
+    const newData = new TrafficData({
+      location,
+      timestamp: new Date(),
+      vehicleCount,
+      signalTiming,
+      congestionLevel,
+      accidentReports,
+      safetyScore,
+    });
+
+    await newData.save();
+
+    res.status(200).send({
+      message: 'Traffic data saved successfully',
+      signalTiming,
+      congestionLevel,
+      safetyScore,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: 'Failed to process traffic data' });
+  }
+});
+
+// Endpoint to retrieve traffic safety data for a location
+app.get('/traffic-safety/:location', async (req, res) => {
+  try {
+    const { location } = req.params;
+
+    const recentData = await TrafficData.findOne({ location }).sort({ timestamp: -1 });
+
+    if (!recentData) {
+      return res.status(404).send({ message: 'No data found for the specified location' });
+    }
+
+    res.status(200).send({
+      location: recentData.location,
+      safetyScore: recentData.safetyScore,
+      congestionLevel: recentData.congestionLevel,
+      accidentReports: recentData.accidentReports,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: 'Failed to retrieve traffic safety data' });
+  }
+});
+
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
+
+// React Frontend Integration (placeholder for development)
+// Serve static files for production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, 'client/build')));
+
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
+  });
+}
